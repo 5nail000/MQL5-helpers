@@ -1,0 +1,108 @@
+# MQL5 Helpers - .gitignore
+
+# Compiled MQL files
+*.ex5
+*.ex4
+
+# Temporary files
+*.tmp
+*.temp
+
+# Log files
+*.log
+
+# Backup files
+*.bak
+*.backup
+
+# IDE files
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Visual Studio files
+.vs/
+*.vcxproj.user
+*.vcxproj.filters
+
+# MetaEditor files
+*.meta
+
+# CSV data files (uncomment if you don't want to track data files)
+# *.csv
+
+# DLL files (uncomment if you don't want to track DLL files)
+# *.dll
+# *.pdb
+
+# Object files
+*.obj
+*.o
+
+# Library files
+*.lib
+*.a
+
+# Executable files
+*.exe
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Windows files
+*.lnk
+
+# Archive files
+*.zip
+*.rar
+*.7z
+*.tar.gz
+
+# Configuration files (uncomment if you don't want to track configs)
+# *.ini
+# *.cfg
+
+# Test files
+test_*
+*_test.*
+
+# Documentation build files
+docs/_build/
+site/
+
+# Python files (if any)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Node.js files (if any)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
