@@ -1,33 +1,33 @@
 //+--------------------------------------------------------------------+
 //|                                                 SimpleLossFixer.mq5|
-//|                                  Version 1.7                       |
+//|                                  Version 1.8                       |
 //|                                                                    |
 //|        Simple Expert Advisor for monitoring drawdown by Magic      |
 //|        Number. Uses enum for mode selection: All (with optional    |
 //|        exclusions) or Selected (comma-separated list). Calculates  |
-//|        TOTAL P&L for each Magic's positions separately. Closes     |
-//|        positions when total P&L <= -StopValue for that Magic (if   |
-//|        not in display-only mode). Displays table on chart.         |
-//|        Logs actions. Checks trading permissions and forces         |
+//|        TOTAL P&L for each Magic's positions separately or by       |
+//|        symbol within Magic if SeparateSymbols is ON. Closes        |
+//|        positions when total P&L <= -StopValue for that Magic or    |
+//|        symbol (if not in display-only mode). Displays table on     |
+//|        chart. Logs actions. Checks trading permissions and forces  |
 //|        display-only if permissions are missing.                    |
 //|                                                                    |
-//|        New in 1.7: Added LOCK mode to ActionProcess. When          |
-//|        triggered, opens opposite positions to hedge (lock) the     |
-//|        net exposure per symbol for the magic, using a unique       |
-//|        lock magic (1064 * 100000 + original_magic). Maintains      |
-//|        the lock by adjusting for any new positions opened by the   |
-//|        original advisor.                                           |
+//|        New in 1.8: Added SeparateSymbols option. When ON, monitors |
+//|        P&L per symbol within each Magic. Actions (close/lock) are  |
+//|        applied per symbol when limit is exceeded. When OFF, uses   |
+//|        original logic (total P&L per Magic).                       |
 //|                                                                    |
 //|        Inputs:                                                     |
 //|        - Mode: All or Selected                                     |
 //|        - MagicNumbersList: For Selected mode (comma-separated)     |
 //|        - ExcludeMagicNumbersList: For All mode (comma-separated)   |
 //|        - StopValue: Critical drawdown limit in account currency    |
-//|        - ActionProcess: Close positions, Display only, or Lock     |
+//|        - ActionProcess: Close positions, Display only, or Lock     | 
+//|        - SeparateSymbols: Monitor P&L per symbol within Magic      |
 //+--------------------------------------------------------------------+
 
 #property strict
-#property version     "1.7"
+#property version     "1.8"
 
 #include <Trade\Trade.mqh>
 
@@ -47,9 +47,10 @@ enum ActionProcessFlag
 };
 
 // Input parameters
-input MonitoringMode Mode = MODE_SELECTED;                            // Monitoring Mode: All or Selected
+input MonitoringMode Mode = MODE_ALL;                            // Monitoring Mode: All or Selected
 input string MagicNumbersList = "12345";                              // For Selected: Comma-separated Magic Numbers (e.g., "12345,67890")
 input string ExcludeMagicNumbersList = "";                            // For All: Comma-separated exclusions (e.g., "99999,00000")
+input bool SeparateSymbols = true;                                    // Monitor P&L per symbol within Magic (ON/OFF)
 input double StopValue = 550.0;                                       // Critical drawdown limit (negative P&L threshold)
 input ActionProcessFlag ActionProcess = CLOSE_POSITIONS;              // Action Process: Close positions, Display only, or Lock
 
@@ -113,7 +114,7 @@ int OnInit()
             }
         }
         
-        Print("SimpleLossFixer initialized in ALL mode (with ", ArraySize(excludes), " exclusions). Monitoring unique Magic Numbers in open positions. StopValue: ", StopValue, ". Action: ", EnumToString(ActionProcess), " (Effective: ", (onlyDisplay ? "Display Only" : "Active"), ")");
+        Print("SimpleLossFixer initialized in ALL mode (with ", ArraySize(excludes), " exclusions). Monitoring unique Magic Numbers in open positions. StopValue: ", StopValue, ". Action: ", EnumToString(ActionProcess), " (Effective: ", (onlyDisplay ? "Display Only" : "Active"), "). SeparateSymbols: ", (SeparateSymbols ? "ON" : "OFF"));
     }
     else  // MODE_SELECTED
     {
@@ -143,7 +144,7 @@ int OnInit()
             }
         }
         
-        Print("SimpleLossFixer initialized in SELECTED mode. Monitoring ", numMagics, " specific Magic Number(s). StopValue: ", StopValue, ". Action: ", EnumToString(ActionProcess), " (Effective: ", (onlyDisplay ? "Display Only" : "Active"), ")");
+        Print("SimpleLossFixer initialized in SELECTED mode. Monitoring ", numMagics, " specific Magic Number(s). StopValue: ", StopValue, ". Action: ", EnumToString(ActionProcess), " (Effective: ", (onlyDisplay ? "Display Only" : "Active"), "). SeparateSymbols: ", (SeparateSymbols ? "ON" : "OFF"));
     }
     
     trade.SetExpertMagicNumber(0);  // No specific magic for this EA's trades
@@ -165,25 +166,31 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| Get lock magic for a given original magic                        |
+//| Get lock magic for a given original magic and symbol             |
 //+------------------------------------------------------------------+
-long GetLockMagic(int originalMagic)
+long GetLockMagic(int originalMagic, string symbol = "")
 {
-    return lockBase * 100000 + originalMagic;  // Assuming originalMagic < 100000; adjust multiplier if needed
+    if(SeparateSymbols && symbol != "")
+    {
+        // Use a unique lock magic per symbol by incorporating symbol hash
+        uint hash = (uint)StringToInteger(StringSubstr(symbol, 0, 6)); // Simple hash from first 6 chars
+        return lockBase * 100000 + originalMagic + (hash % 1000); // Ensure unique per symbol
+    }
+    return lockBase * 100000 + originalMagic;  // Original logic for non-separated
 }
 
 //+------------------------------------------------------------------+
-//| Check if lock exists for a magic (any position with lock magic)  |
+//| Check if lock exists for a magic (and symbol if SeparateSymbols) |
 //+------------------------------------------------------------------+
-bool LockExists(int originalMagic)
+bool LockExists(int originalMagic, string symbol = "")
 {
-    long lockMagic = GetLockMagic(originalMagic);
+    long lockMagic = GetLockMagic(originalMagic, symbol);
     for(int i = 0; i < PositionsTotal(); i++)
     {
         if(PositionGetSymbol(i) != "")
         {
             long magic = PositionGetInteger(POSITION_MAGIC);
-            if(magic == lockMagic)
+            if(magic == lockMagic && (!SeparateSymbols || PositionGetString(POSITION_SYMBOL) == symbol))
             {
                 return true;
             }
@@ -259,12 +266,24 @@ double GetNetLots(long targetMagic, string symbol)
 //+------------------------------------------------------------------+
 //| Lock positions for a magic (open initial hedges)                 |
 //+------------------------------------------------------------------+
-void LockPositions(int originalMagic)
+void LockPositions(int originalMagic, string symbol = "")
 {
-    long lockMagic = GetLockMagic(originalMagic);
+    long lockMagic = GetLockMagic(originalMagic, symbol);
     string symbols[];
     int symCount;
-    GetSymbolsForMagic(originalMagic, symbols, symCount);
+    
+    if(SeparateSymbols && symbol != "")
+    {
+        // Lock only the specified symbol
+        ArrayResize(symbols, 1);
+        symbols[0] = symbol;
+        symCount = 1;
+    }
+    else
+    {
+        // Lock all symbols for the magic
+        GetSymbolsForMagic(originalMagic, symbols, symCount);
+    }
     
     for(int s = 0; s < symCount; s++)
     {
@@ -292,40 +311,18 @@ void LockPositions(int originalMagic)
 //+------------------------------------------------------------------+
 void CheckAndAdjustLock(int originalMagic)
 {
-    long lockMagic = GetLockMagic(originalMagic);
-    
-    // Collect all unique symbols involved (original or lock)
     string symbols[];
-    int symCount = 0;
+    int symCount;
+    GetSymbolsForMagic(originalMagic, symbols, symCount);
     
-    // From original
-    string origSymbols[];
-    int origCount;
-    GetSymbolsForMagic(originalMagic, origSymbols, origCount);
-    for(int o = 0; o < origCount; o++)
-    {
-        bool exists = false;
-        for(int s = 0; s < symCount; s++)
-        {
-            if(symbols[s] == origSymbols[o])
-            {
-                exists = true;
-                break;
-            }
-        }
-        if(!exists)
-        {
-            ArrayResize(symbols, symCount + 1);
-            symbols[symCount] = origSymbols[o];
-            symCount++;
-        }
-    }
-    
-    // From lock
+    // Also include symbols from lock magic
+    long lockMagic = GetLockMagic(originalMagic);
     string lockSymbols[];
-    int lockCount;
-    GetSymbolsForMagic(lockMagic, lockSymbols, lockCount);
-    for(int l = 0; l < lockCount; l++)
+    int lockSymCount;
+    GetSymbolsForMagic(lockMagic, lockSymbols, lockSymCount);
+    
+    // Merge unique symbols
+    for(int l = 0; l < lockSymCount; l++)
     {
         bool exists = false;
         for(int s = 0; s < symCount; s++)
@@ -348,8 +345,9 @@ void CheckAndAdjustLock(int originalMagic)
     for(int s = 0; s < symCount; s++)
     {
         string sym = symbols[s];
+        long currentLockMagic = SeparateSymbols ? GetLockMagic(originalMagic, sym) : lockMagic;
         double netOriginal = GetNetLots(originalMagic, sym);
-        double netLock = GetNetLots(lockMagic, sym);
+        double netLock = GetNetLots(currentLockMagic, sym);
         double desiredNetLock = -netOriginal;
         double delta = desiredNetLock - netLock;
         
@@ -357,10 +355,10 @@ void CheckAndAdjustLock(int originalMagic)
         {
             ENUM_ORDER_TYPE orderType = (delta > 0.0) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
             double volume = MathAbs(delta);
-            trade.SetExpertMagicNumber(lockMagic);  // Set the magic number for the trade
+            trade.SetExpertMagicNumber(currentLockMagic);  // Set the magic number for the trade
             if(trade.PositionOpen(sym, orderType, volume, 0, 0, 0, "Adjust Lock for " + IntegerToString(originalMagic)))
             {
-                Print("Lock adjusted: ", sym, " ", EnumToString(orderType), " ", DoubleToString(volume, 2), " (Magic: ", lockMagic, ")");
+                Print("Lock adjusted: ", sym, " ", EnumToString(orderType), " ", DoubleToString(volume, 2), " (Magic: ", currentLockMagic, ")");
             }
             else
             {
@@ -386,7 +384,6 @@ void DisplayTable()
             long magic = PositionGetInteger(POSITION_MAGIC);
             if(magic > 0)  // Ignore 0 (system positions)
             {
-                // Check if already in unique list
                 bool exists = false;
                 for(int u = 0; u < uniqueCount; u++)
                 {
@@ -406,7 +403,7 @@ void DisplayTable()
         }
     }
     
-    // Determine which Magics to monitor (same logic as OnTick)
+    // Determine which Magics to monitor
     int monitorMagics[];
     int monitorCount = 0;
     if(isAllMode)
@@ -459,12 +456,16 @@ void DisplayTable()
     table += TableIndent + "MagicMode: " + EnumToString(Mode) + "\n";
     table += TableIndent + "Action: " + EnumToString(ActionProcess) + "\n";
     table += TableIndent + "StopValue: " + DoubleToString(StopValue, 2) + "\n";
-    table += TableIndent + "\n";  // Empty line before header
+    table += TableIndent + "SeparateSymbols: " + (SeparateSymbols ? "ON" : "OFF") + "\n";
+    table += TableIndent + "\n";
     
     // Header with aligned widths
-    table += TableIndent + StringFormat("%-11s | %-11s | %-20s | %-16s | %-25s\n", "Magic ID", "Positions", "P&L (Currency)", "Drawdown %", "Status");
+    string headerFormat = SeparateSymbols ? "%-11s | %-10s | %-11s | %-20s | %-16s | %-25s\n" : "%-11s | %-11s | %-20s | %-16s | %-25s\n";
+    string header = SeparateSymbols ? StringFormat(headerFormat, "Magic ID", "Symbol", "Positions", "P&L (Currency)", "Drawdown %", "Status")
+                                    : StringFormat(headerFormat, "Magic ID", "Positions", "P&L (Currency)", "Drawdown %", "Status");
+    table += TableIndent + header;
     
-    // Separator line matching total width (11+3+11+3+20+3+16+3+25 = 92 chars)
+    // Separator line
     string separator;
     StringInit(separator, 120, '-');
     table += TableIndent + separator + "\n";
@@ -472,46 +473,96 @@ void DisplayTable()
     for(int mk = 0; mk < monitorCount; mk++)
     {
         int currentMagic = monitorMagics[mk];
-        double totalPnL = 0.0;
-        int count = 0;
         
-        // Calculate P&L and count for this Magic
-        for(int i = 0; i < PositionsTotal(); i++)
+        if(SeparateSymbols)
         {
-            if(PositionGetSymbol(i) != "")
+            // Get all symbols for this magic
+            string symbols[];
+            int symCount;
+            GetSymbolsForMagic(currentMagic, symbols, symCount);
+            
+            for(int s = 0; s < symCount; s++)
             {
-                long magic = PositionGetInteger(POSITION_MAGIC);
-                double profit = PositionGetDouble(POSITION_PROFIT);
+                string sym = symbols[s];
+                double totalPnL = 0.0;
+                int count = 0;
                 
-                if(magic == currentMagic)
+                // Calculate P&L and count for this Magic and Symbol
+                for(int i = 0; i < PositionsTotal(); i++)
                 {
-                    totalPnL += profit;
-                    count++;
+                    if(PositionGetSymbol(i) == sym)
+                    {
+                        long magic = PositionGetInteger(POSITION_MAGIC);
+                        double profit = PositionGetDouble(POSITION_PROFIT);
+                        if(magic == currentMagic)
+                        {
+                            totalPnL += profit;
+                            count++;
+                        }
+                    }
                 }
+                
+                // Prepare strings
+                string pnlStr = DoubleToString(totalPnL, 2);
+                if(StringLen(pnlStr) > 20) pnlStr = StringSubstr(pnlStr, 0, 20);
+                
+                string drawdownPct = "0.0%";
+                if(totalPnL < 0)
+                {
+                    double pct = MathAbs(totalPnL) / StopValue * 100.0;
+                    drawdownPct = StringFormat("%.1f%%", pct);
+                }
+                if(StringLen(drawdownPct) > 16) drawdownPct = StringSubstr(drawdownPct, 0, 16);
+                
+                string status = (totalPnL <= -StopValue) ? "EXCEEDED!" : "OK";
+                if(isLockMode && LockExists(currentMagic, sym)) status += " - LOCKED";
+                if(onlyDisplay) status += " (Display Only)";
+                if(StringLen(status) > 25) status = StringSubstr(status, 0, 25);
+                
+                table += TableIndent + StringFormat("%-11d | %-10s | %-11d | %-20s | %-16s | %-25s\n", 
+                                                    currentMagic, sym, count, pnlStr, drawdownPct, status);
             }
         }
-        
-        // Prepare strings and truncate if necessary to prevent overflow
-        string pnlStr = DoubleToString(totalPnL, 2);
-        if(StringLen(pnlStr) > 20) pnlStr = StringSubstr(pnlStr, 0, 20);
-        
-        // Drawdown %: Only if totalPnL < 0, else empty
-        string drawdownPct = "0.0%";
-        if(totalPnL < 0)
+        else
         {
-            double pct = MathAbs(totalPnL) / StopValue * 100.0;
-            drawdownPct = StringFormat("%.1f%%", pct);
+            double totalPnL = 0.0;
+            int count = 0;
+            
+            // Calculate P&L and count for this Magic
+            for(int i = 0; i < PositionsTotal(); i++)
+            {
+                if(PositionGetSymbol(i) != "")
+                {
+                    long magic = PositionGetInteger(POSITION_MAGIC);
+                    double profit = PositionGetDouble(POSITION_PROFIT);
+                    if(magic == currentMagic)
+                    {
+                        totalPnL += profit;
+                        count++;
+                    }
+                }
+            }
+            
+            // Prepare strings
+            string pnlStr = DoubleToString(totalPnL, 2);
+            if(StringLen(pnlStr) > 20) pnlStr = StringSubstr(pnlStr, 0, 20);
+            
+            string drawdownPct = "0.0%";
+            if(totalPnL < 0)
+            {
+                double pct = MathAbs(totalPnL) / StopValue * 100.0;
+                drawdownPct = StringFormat("%.1f%%", pct);
+            }
+            if(StringLen(drawdownPct) > 16) drawdownPct = StringSubstr(drawdownPct, 0, 16);
+            
+            string status = (totalPnL <= -StopValue) ? "EXCEEDED!" : "OK";
+            if(isLockMode && LockExists(currentMagic)) status += " - LOCKED";
+            if(onlyDisplay) status += " (Display Only)";
+            if(StringLen(status) > 25) status = StringSubstr(status, 0, 25);
+            
+            table += TableIndent + StringFormat("%-11d | %-11d | %-20s | %-16s | %-25s\n", 
+                                                currentMagic, count, pnlStr, drawdownPct, status);
         }
-        if(StringLen(drawdownPct) > 16) drawdownPct = StringSubstr(drawdownPct, 0, 16);
-        
-        // Status: Exceeded if totalPnL <= -StopValue
-        string status = (totalPnL <= -StopValue) ? "EXCEEDED!" : "OK";
-        if(isLockMode && LockExists(currentMagic)) status += " - LOCKED";
-        if(onlyDisplay) status += " (Display Only)";
-        if(StringLen(status) > 25) status = StringSubstr(status, 0, 25);
-        
-        table += TableIndent + StringFormat("%-11d | %-14d | %-24s | %-22s | %-25s\n", 
-                                            currentMagic, count, pnlStr, drawdownPct, status);
     }
     
     if(monitorCount == 0)
@@ -530,7 +581,7 @@ void DisplayTable()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // Collect unique Magic Numbers from open positions (only if positions exist)
+    // Collect unique Magic Numbers from open positions
     int uniqueMagics[];
     int uniqueCount = 0;
     
@@ -541,7 +592,6 @@ void OnTick()
             long magic = PositionGetInteger(POSITION_MAGIC);
             if(magic > 0)  // Ignore 0 (system positions)
             {
-                // Check if already in unique list
                 bool exists = false;
                 for(int u = 0; u < uniqueCount; u++)
                 {
@@ -564,15 +614,12 @@ void OnTick()
     // Determine which Magics to monitor
     int monitorMagics[];
     int monitorCount = 0;
-    if(isAllMode)  // MODE_ALL
+    if(isAllMode)
     {
-        // Monitor all unique Magics, excluding specified ones
         for(int u = 0; u < uniqueCount; u++)
         {
             int umagic = uniqueMagics[u];
             bool isExcluded = false;
-            
-            // Check against exclusions
             for(int e = 0; e < ArraySize(excludes); e++)
             {
                 if(umagic == excludes[e])
@@ -581,7 +628,6 @@ void OnTick()
                     break;
                 }
             }
-            
             if(!isExcluded)
             {
                 ArrayResize(monitorMagics, monitorCount + 1);
@@ -590,9 +636,8 @@ void OnTick()
             }
         }
     }
-    else  // MODE_SELECTED
+    else
     {
-        // Monitor only specified Magics that have positions
         for(int m = 0; m < ArraySize(magics); m++)
         {
             bool hasPositions = false;
@@ -613,80 +658,158 @@ void OnTick()
         }
     }
     
-    // For each monitored Magic Number, calculate total P&L and check limit
+    // For each monitored Magic Number
     for(int mk = 0; mk < monitorCount; mk++)
     {
         int currentMagic = monitorMagics[mk];
-        double totalPnL = 0.0;  // Total Profit/Loss: sum of all profits (positive and negative)
-        string symbolsToClose[];
-        int count = 0;
         
-        // Iterate through all positions to calculate total P&L for this Magic
-        for(int i = 0; i < PositionsTotal(); i++)
+        if(SeparateSymbols)
         {
-            if(PositionGetSymbol(i) != "")
+            // Get all symbols for this magic
+            string symbols[];
+            int symCount;
+            GetSymbolsForMagic(currentMagic, symbols, symCount);
+            
+            for(int s = 0; s < symCount; s++)
             {
-                long magic = PositionGetInteger(POSITION_MAGIC);
-                string posSymbol = PositionGetString(POSITION_SYMBOL);
-                double profit = PositionGetDouble(POSITION_PROFIT);
+                string sym = symbols[s];
+                double totalPnL = 0.0;
+                int count = 0;
+                string positionsToClose[];
                 
-                if(magic == currentMagic)
+                // Calculate P&L and collect positions for this Magic and Symbol
+                for(int i = 0; i < PositionsTotal(); i++)
                 {
-                    totalPnL += profit;  // Sum ALL profits/losses
-                    ArrayResize(symbolsToClose, count + 1);
-                    symbolsToClose[count] = posSymbol;
-                    count++;
+                    if(PositionGetSymbol(i) == sym)
+                    {
+                        long magic = PositionGetInteger(POSITION_MAGIC);
+                        double profit = PositionGetDouble(POSITION_PROFIT);
+                        if(magic == currentMagic)
+                        {
+                            totalPnL += profit;
+                            ArrayResize(positionsToClose, count + 1);
+                            positionsToClose[count] = PositionGetString(POSITION_SYMBOL);
+                            count++;
+                        }
+                    }
+                }
+                
+                // Handle based on mode
+                if(totalPnL <= -StopValue && count > 0)
+                {
+                    if(!onlyDisplay)
+                    {
+                        if(ActionProcess == CLOSE_POSITIONS)
+                        {
+                            // Close positions for this symbol
+                            for(int j = 0; j < count; j++)
+                            {
+                                if(trade.PositionClose(positionsToClose[j]))
+                                {
+                                    Print("Position closed: ", positionsToClose[j], " (Magic: ", currentMagic, ")");
+                                }
+                                else
+                                {
+                                    Print("Error closing position ", positionsToClose[j], ": ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                                }
+                            }
+                            
+                            string message = StringFormat("Drawdown limit exceeded for Magic %d, Symbol %s: Total P&L %.2f <= -%.2f. All %d positions closed.", 
+                                                          currentMagic, sym, totalPnL, StopValue, count);
+                            Print(message);
+                            Alert(message);
+                        }
+                        else if(isLockMode)
+                        {
+                            if(!LockExists(currentMagic, sym))
+                            {
+                                LockPositions(currentMagic, sym);
+                                
+                                string message = StringFormat("Drawdown limit exceeded for Magic %d, Symbol %s: Total P&L %.2f <= -%.2f. Positions locked.", 
+                                                              currentMagic, sym, totalPnL, StopValue);
+                                Print(message);
+                                Alert(message);
+                            }
+                        }
+                    }
+                }
+                
+                // Adjust lock if exists
+                if(isLockMode && !onlyDisplay && LockExists(currentMagic, sym))
+                {
+                    CheckAndAdjustLock(currentMagic);
                 }
             }
         }
-        
-        // Handle based on mode
-        if(totalPnL <= -StopValue && count > 0)
+        else
         {
-            if(!onlyDisplay)
+            double totalPnL = 0.0;
+            int count = 0;
+            string symbolsToClose[];
+            
+            // Calculate P&L and collect positions for this Magic
+            for(int i = 0; i < PositionsTotal(); i++)
             {
-                if(ActionProcess == CLOSE_POSITIONS)
+                if(PositionGetSymbol(i) != "")
                 {
-                    // Close positions
-                    for(int j = 0; j < count; j++)
+                    long magic = PositionGetInteger(POSITION_MAGIC);
+                    string posSymbol = PositionGetString(POSITION_SYMBOL);
+                    double profit = PositionGetDouble(POSITION_PROFIT);
+                    if(magic == currentMagic)
                     {
-                        if(trade.PositionClose(symbolsToClose[j]))
-                        {
-                            Print("Position closed: ", symbolsToClose[j], " (Magic: ", currentMagic, ")");
-                        }
-                        else
-                        {
-                            Print("Error closing position ", symbolsToClose[j], ": ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
-                        }
+                        totalPnL += profit;
+                        ArrayResize(symbolsToClose, count + 1);
+                        symbolsToClose[count] = posSymbol;
+                        count++;
                     }
-                    
-                    // Log the event
-                    string message = StringFormat("Drawdown limit exceeded for Magic %d: Total P&L %.2f <= -%.2f. All %d positions closed.", 
-                                                  currentMagic, totalPnL, StopValue, count);
-                    Print(message);
-                    Alert(message);  // Optional alert for immediate notification
                 }
-                else if(isLockMode)
+            }
+            
+            // Handle based on mode
+            if(totalPnL <= -StopValue && count > 0)
+            {
+                if(!onlyDisplay)
                 {
-                    // Lock mode: If not already locked, initiate lock
-                    if(!LockExists(currentMagic))
+                    if(ActionProcess == CLOSE_POSITIONS)
                     {
-                        LockPositions(currentMagic);
+                        // Close positions
+                        for(int j = 0; j < count; j++)
+                        {
+                            if(trade.PositionClose(symbolsToClose[j]))
+                            {
+                                Print("Position closed: ", symbolsToClose[j], " (Magic: ", currentMagic, ")");
+                            }
+                            else
+                            {
+                                Print("Error closing position ", symbolsToClose[j], ": ", trade.ResultRetcode(), " - ", trade.ResultRetcodeDescription());
+                            }
+                        }
                         
-                        // Log the event
-                        string message = StringFormat("Drawdown limit exceeded for Magic %d: Total P&L %.2f <= -%.2f. Positions locked.", 
-                                                      currentMagic, totalPnL, StopValue);
+                        string message = StringFormat("Drawdown limit exceeded for Magic %d: Total P&L %.2f <= -%.2f. All %d positions closed.", 
+                                                      currentMagic, totalPnL, StopValue, count);
                         Print(message);
                         Alert(message);
                     }
+                    else if(isLockMode)
+                    {
+                        if(!LockExists(currentMagic))
+                        {
+                            LockPositions(currentMagic);
+                            
+                            string message = StringFormat("Drawdown limit exceeded for Magic %d: Total P&L %.2f <= -%.2f. Positions locked.", 
+                                                          currentMagic, totalPnL, StopValue);
+                            Print(message);
+                            Alert(message);
+                        }
+                    }
                 }
             }
-        }
-        
-        // For Lock mode, if lock exists, always check and adjust (even if not exceeded)
-        if(isLockMode && !onlyDisplay && LockExists(currentMagic))
-        {
-            CheckAndAdjustLock(currentMagic);
+            
+            // Adjust lock if exists
+            if(isLockMode && !onlyDisplay && LockExists(currentMagic))
+            {
+                CheckAndAdjustLock(currentMagic);
+            }
         }
     }
     
